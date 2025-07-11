@@ -2,11 +2,13 @@ import express from 'express';
 import bodyParser from 'body-parser';
 import { handleIncomingData } from './utils/handleIncomingData';
 import { startPolling } from './pooling';
+import chatRouter from './routes/chat';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(bodyParser.json({ limit: '50mb' }));
+app.use('/chat', chatRouter);
 
 let webhookReceived = false;
 
