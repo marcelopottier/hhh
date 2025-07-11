@@ -1,0 +1,30 @@
+{
+  "name": "webhook-polling-fallback",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "ts-node src/index.ts",
+    "build": "tsc",
+    "populate": "ts-node src/utils/populate-embeddings.ts"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "langchain": "^0.3.29",
+    "openai": "^5.9.0",
+    "pg": "^8.16.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.0.13",
+    "@types/pg": "^8.15.4",
+    "jest": "^30.0.4",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3"
+  }
+}
