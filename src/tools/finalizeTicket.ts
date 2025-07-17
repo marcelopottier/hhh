@@ -16,61 +16,14 @@ export const finalizeTicketTool = tool(
     console.log(`[TOOL] Finalizando ticket - Cliente: ${customerId}, Resolvido: ${resolved}`);
     
     try {
-      const ticketId = generateTicketId();
-      
-      // Salvar feedback (implementar conforme necessário)
-      const feedbackRecord = {
-        ticketId,
-        customerId,
-        resolved,
-        feedback: feedback || '',
-        rating: rating || null,
-        solutionUsed: solutionUsed || '',
-        createdAt: new Date(),
-      };
-      
-      console.log("[TOOL] Feedback salvo:", feedbackRecord);
+      const ticketId = `TICKET-${Date.now()}-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
       
       if (resolved) {
-        return {
+        const stars = rating ? '⭐'.repeat(rating) + '☆'.repeat(5 - rating) : '';
+        
+        return JSON.stringify({
           success: true,
-          message: generateSuccessMessage(ticketId, customerId, feedback, rating, solutionUsed),
-          ticketId,
-          status: 'resolved',
-        };
-      } else {
-        return {
-          success: true,
-          message: generateContinueMessage(feedback),
-          ticketId,
-          status: 'pending',
-        };
-      }
-      
-    } catch (error) {
-      console.error("[TOOL] Erro ao finalizar ticket:", error);
-      return {
-        success: false,
-        message: "Erro interno ao finalizar ticket.",
-        error: error instanceof Error ? error.message : "Erro desconhecido",
-      };
-    }
-  },
-  {
-    name: "finalizeTicket",
-    description: "Finaliza o ticket após resolução ou coleta feedback para continuar",
-    schema: finalizeTicketSchema,
-  }
-);
-
-function generateTicketId(): string {
-  return `TICKET-${Date.now()}-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
-}
-
-function generateSuccessMessage(ticketId: string, customerId: string, feedback?: string, rating?: number, solutionUsed?: string): string {
-  const stars = rating ? '⭐'.repeat(rating) + '☆'.repeat(5 - rating) : '';
-  
-  return `🎉 **PROBLEMA RESOLVIDO!**
+          message: `🎉 **PROBLEMA RESOLVIDO!**
 
 **Ticket:** ${ticketId}
 **Cliente:** ${customerId}
@@ -91,11 +44,14 @@ ${rating ? `**Avaliação:** ${stars} (${rating}/5)` : ''}
 • Site: www.pichau.com.br
 • Suporte: suporte@pichau.com.br
 
-Tenha um ótimo dia! 😊`;
-}
-
-function generateContinueMessage(feedback?: string): string {
-  return `📝 **FEEDBACK REGISTRADO**
+Tenha um ótimo dia! 😊`,
+          ticketId,
+          status: 'resolved',
+        });
+      } else {
+        return JSON.stringify({
+          success: true,
+          message: `📝 **FEEDBACK REGISTRADO**
 
 Obrigado pelo retorno! 
 
@@ -103,5 +59,24 @@ ${feedback ? `**Você disse:** "${feedback}"` : ''}
 
 Vou analisar outras opções de solução para resolver seu problema.
 
-Continue nossa conversa - vamos encontrar a solução! 🔧💙`;
-}
+Continue nossa conversa - vamos encontrar a solução! 🔧💙`,
+          ticketId,
+          status: 'pending',
+        });
+      }
+      
+    } catch (error) {
+      console.error("[TOOL] Erro ao finalizar ticket:", error);
+      return JSON.stringify({
+        success: false,
+        message: "Erro interno ao finalizar ticket.",
+        error: error instanceof Error ? error.message : "Erro desconhecido",
+      });
+    }
+  },
+  {
+    name: "finalizeTicket",
+    description: "Finaliza o ticket após resolução do problema ou coleta feedback para continuar atendimento",
+    schema: finalizeTicketSchema,
+  }
+);

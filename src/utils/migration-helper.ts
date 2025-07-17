@@ -3,7 +3,7 @@
 import { Pool } from 'pg';
 import * as dotenv from 'dotenv';
 import { main as populateEmbeddings } from './populate-embeddings';
-import { EmbeddingService, migrarEstrutulaAntiga } from '../services/embeddingService';
+import { EmbeddingService } from '../services/embeddingService';
 
 dotenv.config();
 
@@ -103,11 +103,6 @@ class MigrationManager {
     }
   }
 
-  // Executar migração dos dados antigos
-  async migrateOldData(): Promise<boolean> {
-    console.log('🔄 Migrando dados da estrutura antiga...');
-    return await migrarEstrutulaAntiga(this.pool);
-  }
 
   // Executar população de embeddings
   async populateEmbeddings(): Promise<boolean> {

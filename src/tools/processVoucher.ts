@@ -15,22 +15,7 @@ export const processVoucherTool = tool(
     console.log(`[TOOL] Processando voucher ${voucherCode} para cliente ${customerId}`);
     
     try {
-      // Salvar voucher no sistema (implementar conforme necessário)
-      const voucherRecord = {
-        code: voucherCode,
-        customerId,
-        customerName,
-        location: customerLocation,
-        value: 150.00,
-        currency: 'BRL',
-        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 dias
-        status: 'active',
-        createdAt: new Date(),
-      };
-      
-      console.log("[TOOL] Voucher processado:", voucherRecord);
-      
-      return {
+      return JSON.stringify({
         success: true,
         message: `✅ **VOUCHER CONFIRMADO**
 
@@ -51,20 +36,20 @@ Um técnico entrará em contato em breve para:
 Obrigado pela compreensão! 💙`,
         voucherCode,
         status: 'processed',
-      };
+      });
       
     } catch (error) {
       console.error("[TOOL] Erro ao processar voucher:", error);
-      return {
+      return JSON.stringify({
         success: false,
         message: "Erro interno ao processar voucher. Um técnico entrará em contato.",
         error: error instanceof Error ? error.message : "Erro desconhecido",
-      };
+      });
     }
   },
   {
     name: "processVoucher",
-    description: "Processa a confirmação do voucher pelo cliente",
+    description: "Processa a confirmação do voucher pelo cliente para assistência técnica local",
     schema: processVoucherSchema,
   }
 );

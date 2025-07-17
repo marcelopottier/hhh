@@ -2,36 +2,20 @@
 //@ts-nocheck
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
-import { FreshDeskService } from "../services/freshDeskService";
 
-// Schema separado (sem .describe ou .default para evitar erro de inferência)
 const escalateSchema = z.object({
-  customerId: z.string(),
-  reason: z.string(),
-  urgency: z.enum(["low", "medium", "high", "urgent"]).optional(),
-  context: z.string().optional(),
+  customerId: z.string().describe("ID do cliente"),
+  reason: z.string().describe("Motivo da escalação"),
+  urgency: z.enum(["low", "medium", "high", "urgent"]).optional().default("medium").describe("Nível de urgência"),
+  context: z.string().optional().describe("Contexto adicional"),
 });
 
 export const escalateToHumanTool = tool(
-  async (input) => {
-    const {
-      customerId,
-      reason,
-      urgency = "medium", // define o default aqui para evitar erro com zod.default()
-      context,
-    } = input;
-
+  async ({ customerId, reason, urgency = "medium", context }) => {
     console.log(`[TOOL] Escalando para humano - Cliente: ${customerId}`);
 
     try {
-      const ticketId = `ESC-${Date.now()}-${customerId}`;
-
-      try {
-        const freshDeskService = FreshDeskService.getInstance();
-        await freshDeskService.escalateToHuman(ticketId, reason, urgency);
-      } catch (error) {
-        console.log("[TOOL] FreshDesk não disponível, usando fallback");
-      }
+      const ticketId = `ESC-${Date.now()}-${customerId.slice(-4)}`;
 
       const escalationMessage = `🚨 **ESCALADO PARA ESPECIALISTA**
 
@@ -51,24 +35,24 @@ Um técnico especializado entrará em contato em breve para dar continuidade ao 
 
 Obrigado pela paciência! 💙`;
 
-      return {
+      return JSON.stringify({
         success: true,
         message: escalationMessage,
         ticketId,
         urgency,
-      };
+      });
     } catch (error) {
       console.error("[TOOL] Erro na escalação:", error);
-      return {
+      return JSON.stringify({
         success: false,
         message: "Erro interno. Um técnico entrará em contato.",
         error: error instanceof Error ? error.message : "Erro desconhecido",
-      };
+      });
     }
   },
   {
     name: "escalateToHuman",
-    description: "Escala o atendimento para um técnico humano especializado",
+    description: "Escala o atendimento para um técnico humano especializado quando não é possível resolver automaticamente",
     schema: escalateSchema,
   }
 );

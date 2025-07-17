@@ -1,7 +1,6 @@
-// src/services/freshDeskWebhookService.ts (ATUALIZADO COM CHAT HISTORY)
 import { FreshDeskService } from './freshDeskService';
 import { LangGraphAgent } from './langGraphAgent';
-import { ChatHistoryService } from './chatHistoryService';
+import { ConversationService } from './conversationService';
 
 export interface FreshDeskTicket {
   id: number;
@@ -53,13 +52,13 @@ export class FreshDeskWebhookService {
   private static instance: FreshDeskWebhookService;
   private freshDeskService: FreshDeskService;
   private agent: LangGraphAgent;
-  private chatHistory: ChatHistoryService;
+  private conversationService: ConversationService;
   private processingTickets: Set<number> = new Set();
 
   private constructor() {
     this.freshDeskService = FreshDeskService.getInstance();
     this.agent = LangGraphAgent.getInstance();
-    this.chatHistory = ChatHistoryService.getInstance();
+    this.conversationService = ConversationService.getInstance();
   }
 
   public static getInstance(): FreshDeskWebhookService {
@@ -97,12 +96,13 @@ export class FreshDeskWebhookService {
         throw new Error(`Não foi possível obter dados do ticket ${ticketId}`);
       }
 
-      // ETAPA 2: Verificar histórico da conversa
-      const existingContext = await this.chatHistory.getConversationContext(ticketId.toString());
+      // ETAPA 2: Verificar se já existe uma sessão para este ticket
+      const threadId = `ticket_${ticketId}`;
+      const existingSession = await this.conversationService.getSession(threadId);
       
-      if (existingContext) {
-        console.log(`[WEBHOOK] 📋 Conversa existente encontrada - ${existingContext.attempts.length} tentativas anteriores`);
-        return await this.handleFollowUp(ticketData, existingContext);
+      if (existingSession) {
+        console.log(`[WEBHOOK] 📋 Conversa existente encontrada - ${existingSession.totalMessages} mensagens`);
+        return await this.handleFollowUp(ticketData, existingSession);
       } else {
         console.log(`[WEBHOOK] 🆕 Nova conversa - primeiro contato`);
         return await this.handleFirstContact(ticketData);
@@ -135,57 +135,39 @@ export class FreshDeskWebhookService {
       const problemAnalysis = this.analyzeTicketProblem(ticket);
       const hasAttachments = ticket.attachments && ticket.attachments.length > 0;
 
-      // Criar conversa no histórico
-      const conversation = await this.chatHistory.getOrCreateConversation(
-        ticket.id.toString(),
-        {
-          customerId: ticket.requester_id.toString(),
-          subject: ticket.subject,
-          initialProblem: ticket.description_text,
-          category: problemAnalysis.category,
-          priority: ticket.priority,
-          hasAttachments: hasAttachments,
-          orderNumber: problemAnalysis.orderNumber,
-          customFields: {
-            freshdesk_id: ticket.id,
-            type: ticket.type,
-            source: ticket.source,
-            tags: ticket.tags
-          }
-        }
-      );
-
-      // Registrar webhook como primeira mensagem
-      await this.chatHistory.addMessage(conversation.id, {
-        messageType: 'webhook',
-        sender: 'webhook_service',
-        content: `Novo ticket recebido: ${ticket.subject}\n\nProblema: ${ticket.description_text}`,
-        intent: 'ticket_created',
-        metadata: {
-          ticket_id: ticket.id,
-          problem_analysis: problemAnalysis,
-          has_attachments: hasAttachments
-        }
+      const threadId = `ticket_${ticket.id}`;
+      
+      // Criar nova sessão de conversa
+      const session = await this.conversationService.createSession({
+        threadId,
+        customerId: ticket.requester_id.toString(),
+        primaryIssueCategory: problemAnalysis.category,
+        primaryIssueDescription: ticket.description_text,
+        tags: [
+          ...ticket.tags,
+          problemAnalysis.category,
+          hasAttachments ? 'with_attachments' : 'text_only',
+          `priority_${ticket.priority}`
+        ],
+        userAgent: `FreshDesk-Ticket-${ticket.id}`,
+        deviceType: 'freshdesk_integration'
       });
 
-      // Gerar primeiro contato usando agent
+      console.log(`[WEBHOOK] ✅ Sessão criada: ${session.threadId}`);
+
+      // Construir contexto de primeiro contato
       const agentContext = this.buildFirstContactContext(ticket, problemAnalysis, hasAttachments);
+      
+      // Processar com agent LangGraph
       const agentResponse = await this.agent.processQuery(
         agentContext,
-        `ticket_${ticket.id}` // threadId único por ticket
-      , []);
+        threadId
+      );
 
-      // Registrar resposta do agent
-      const agentMessage = await this.chatHistory.addMessage(conversation.id, {
-        messageType: 'agent',
-        sender: 'ai_agent',
-        content: agentResponse.response,
-        intent: 'first_contact',
-        toolUsed: 'searchProcedures', // Assumindo que usou busca
-        metadata: {
-          thread_id: `ticket_${ticket.id}`,
-          message_count: agentResponse.messages.length
-        }
+      // Atualizar sessão com resultado
+      await this.conversationService.updateSession(threadId, {
+        status: 'active',
+        issueResolved: false
       });
 
       // Enviar resposta
@@ -209,64 +191,52 @@ export class FreshDeskWebhookService {
    */
   private async handleFollowUp(
     ticket: FreshDeskTicket, 
-    context: any
+    session: any
   ): Promise<{ success: boolean; message: string }> {
     try {
-      console.log(`[WEBHOOK] 🔄 Processando follow-up - Status: ${context.conversation.status}`);
+      console.log(`[WEBHOOK] 🔄 Processando follow-up - Status: ${session.status}`);
 
       // Verificar se conversa já foi fechada
-      if (['resolved', 'escalated', 'closed'].includes(context.conversation.status)) {
-        console.log(`[WEBHOOK] ⏭️ Conversa já ${context.conversation.status}, ignorando webhook`);
+      if (['resolved', 'escalated', 'archived'].includes(session.status)) {
+        console.log(`[WEBHOOK] ⏭️ Conversa já ${session.status}, ignorando webhook`);
         return {
           success: true,
-          message: `Conversa já finalizada (${context.conversation.status})`
+          message: `Conversa já finalizada (${session.status})`
         };
       }
 
-      // 🆕 SALVAR MENSAGEM DO CLIENTE PRIMEIRO
-      console.log(`[WEBHOOK] 💬 Salvando nova mensagem do cliente...`);
-      await this.chatHistory.addMessageWithAnalysis(context.conversation.id, {
-        messageType: 'user',
-        sender: 'customer',
-        content: ticket.description_text,
-        intent: 'follow_up_response',
-        attachments: ticket.attachments || [],
-        metadata: {
-          source: 'freshdesk_webhook',
-          ticket_updated_at: ticket.updated_at,
-          has_attachments: (ticket.attachments?.length || 0) > 0
-        }
-      });
+      const threadId = `ticket_${ticket.id}`;
 
-      // Obter resumo ATUALIZADO do histórico para o agent (agora incluindo mensagem do cliente)
-      const historySummary = await this.chatHistory.getAgentSummary(ticket.id.toString());
-      console.log(`[WEBHOOK] 📋 Resumo atualizado: ${historySummary.substring(0, 500)}...`);
-              
-      // Construir contexto de follow-up
-      const followUpContext = this.buildFollowUpContext(ticket, context, historySummary);
+      // Obter mensagens existentes para construir contexto
+      const existingMessages = await this.conversationService.getMessages(threadId);
+      
+      // Construir contexto de follow-up baseado no histórico
+      const followUpContext = this.buildFollowUpContext(ticket, session, existingMessages);
               
       // Processar com agent
       const agentResponse = await this.agent.processQuery(
         followUpContext,
-        `ticket_${ticket.id}` // Mesmo threadId para manter contexto
-      , []);
+        threadId
+      );
 
-      // Registrar resposta do agent
-      await this.chatHistory.addMessage(context.conversation.id, {
-        messageType: 'agent',
-        sender: 'ai_agent',
-        content: agentResponse.response,
-        intent: 'follow_up',
-        metadata: {
-          attempt_count: context.conversation.attempt_count,
-          next_action: context.next_action,
-          message_count: agentResponse.messages.length,
-          responding_to: 'customer_follow_up'
-        }
+      // Atualizar sessão baseado na resposta
+      let newStatus = session.status;
+      let issueResolved = false;
+      
+      // Analisar resposta para determinar status
+      if (agentResponse.response.toLowerCase().includes('escalado') || 
+          agentResponse.response.toLowerCase().includes('especialista')) {
+        newStatus = 'escalated';
+      } else if (agentResponse.response.toLowerCase().includes('resolvido') ||
+                 agentResponse.response.toLowerCase().includes('problema resolvido')) {
+        newStatus = 'resolved';
+        issueResolved = true;
+      }
+
+      await this.conversationService.updateSession(threadId, {
+        status: newStatus,
+        issueResolved
       });
-
-      // Verificar se precisa de ação especial baseada no histórico
-      await this.handleSpecialActions(context, ticket.id.toString());
 
       // Enviar resposta
       await this.sendFollowUpResponse(ticket, agentResponse.response);
@@ -275,48 +245,12 @@ export class FreshDeskWebhookService {
       
       return {
         success: true,
-        message: `Follow-up processado para ticket ${ticket.id} (tentativa ${context.conversation.attempt_count + 1})`
+        message: `Follow-up processado para ticket ${ticket.id} (${existingMessages.length + 1} mensagens)`
       };
 
     } catch (error) {
       console.error(`[WEBHOOK] ❌ Erro no follow-up:`, error);
       throw error;
-    }
-  }
-
-  /**
-   * Ações especiais baseadas no histórico
-   */
-  private async handleSpecialActions(context: any, ticketId: string): Promise<void> {
-    try {
-      const { conversation, next_action } = context;
-
-      switch (next_action) {
-        case 'escalate':
-          console.log(`[WEBHOOK] 🚨 Marcando ticket ${ticketId} para escalonamento`);
-          await this.chatHistory.markRequiresHuman(
-            ticketId, 
-            `Múltiplas tentativas falharam (${conversation.attempt_count} tentativas)`
-          );
-          break;
-
-        case 'collect':
-          console.log(`[WEBHOOK] 📦 Ticket ${ticketId} elegível para coleta`);
-          // Aqui poderia automaticamente triggerar collectEquipment
-          break;
-
-        case 'finalize':
-          console.log(`[WEBHOOK] ✅ Ticket ${ticketId} pode ser finalizado`);
-          // Aqui poderia automaticamente triggerar finalizeTicket
-          break;
-
-        default:
-          // Continue normalmente
-          break;
-      }
-
-    } catch (error) {
-      console.error(`[WEBHOOK] ❌ Erro nas ações especiais:`, error);
     }
   }
 
@@ -328,21 +262,22 @@ export class FreshDeskWebhookService {
     analysis: ReturnType<typeof this.analyzeTicketProblem>,
     hasAttachments: boolean
   ): string {
-    return `NOVO TICKET - PRIMEIRO CONTATO
+    return `NOVO TICKET FRESHDESK - PRIMEIRO CONTATO
 
 INSTRUÇÕES:
-1. Este é o PRIMEIRO CONTATO com o cliente
-2. Use "searchProcedures" para buscar solução técnica
-3. Forneça resposta completa e profissional
-4. ${hasAttachments ? 'Reconheça os anexos enviados' : 'Baseie-se na descrição textual'}
+1. Este é o PRIMEIRO CONTATO com o cliente via FreshDesk
+2. Use "searchProcedures" para buscar solução técnica específica
+3. Forneça resposta completa e profissional para ticket de suporte
+4. ${hasAttachments ? 'Reconheça que cliente anexou arquivos/fotos' : 'Baseie-se na descrição textual'}
 
 DADOS DO TICKET:
 - ID: ${ticket.id}
 - Assunto: ${ticket.subject}
-- Prioridade: ${ticket.priority}
+- Prioridade: ${ticket.priority} (1=baixa, 4=urgente)
+- Tipo: ${ticket.type}
 ${analysis.orderNumber ? `- Pedido: ${analysis.orderNumber}` : ''}
 
-PROBLEMA RELATADO:
+PROBLEMA RELATADO PELO CLIENTE:
 ${ticket.description_text}
 
 ANÁLISE AUTOMÁTICA:
@@ -351,7 +286,10 @@ ANÁLISE AUTOMÁTICA:
 - Urgência: ${analysis.urgency}
 ${hasAttachments ? '- Cliente anexou arquivos/fotos' : '- Sem anexos'}
 
-AÇÃO: Use searchProcedures para buscar solução e gere resposta de primeiro contato.`;
+AÇÃO REQUERIDA:
+1. Use searchProcedures para buscar solução específica
+2. Gere resposta de primeiro contato profissional
+3. Inclua procedimentos detalhados se encontrados`;
   }
 
   /**
@@ -359,26 +297,38 @@ AÇÃO: Use searchProcedures para buscar solução e gere resposta de primeiro c
    */
   private buildFollowUpContext(
     ticket: FreshDeskTicket,
-    context: any,
-    historySummary: string
+    session: any,
+    existingMessages: any[]
   ): string {
-    return `FOLLOW-UP DE CONVERSA EXISTENTE
+    // Construir resumo do histórico
+    const messagesSummary = existingMessages
+      .filter(msg => msg.role !== 'system')
+      .map((msg, index) => `${index + 1}. ${msg.role.toUpperCase()}: ${msg.content.substring(0, 200)}...`)
+      .join('\n');
 
-${historySummary}
+    return `FOLLOW-UP TICKET FRESHDESK
+
+HISTÓRICO DA CONVERSA:
+${messagesSummary}
 
 NOVA MENSAGEM DO CLIENTE:
 "${ticket.description_text}"
+
+CONTEXTO DA SESSÃO:
+- Ticket ID: ${ticket.id}
+- Total de mensagens: ${session.totalMessages}
+- Status atual: ${session.status}
+- Cliente: ${session.customerId}
 
 INSTRUÇÕES PARA FOLLOW-UP:
 1. O cliente acabou de responder com a mensagem acima
 2. Analise o histórico completo da conversa
 3. Responda de forma contextualizada baseada nas tentativas anteriores
-4. Se o cliente diz que não funcionou, considere próxima solução ou escalação
-5. Use ferramentas adequadas (searchProcedures, collectEquipment, finalizeTicket)
-6. Próxima ação recomendada: ${context.next_action}
+4. Se cliente diz que não funcionou, considere próxima solução ou escalação
+5. Use ferramentas adequadas (searchProcedures, collectEquipment, finalizeTicket, escalateToHuman)
 
-${context.conversation.attempt_count >= 2 ? 
-  '⚠️ ATENÇÃO: Cliente já teve múltiplas tentativas. Considere escalação ou coleta.' : 
+${session.totalMessages >= 6 ? 
+  '⚠️ ATENÇÃO: Conversa longa. Considere escalação se cliente não conseguir resolver.' : 
   'Continue com próxima solução adequada.'}
 
 Responda ao cliente de forma natural e contextualizada.`;
@@ -431,7 +381,7 @@ Responda ao cliente de forma natural e contextualizada.`;
         due_by: "2025-07-21T11:23:54Z",
         fr_due_by: "2025-07-16T16:49:08Z",
         created_at: "2025-07-16T15:40:30Z",
-        updated_at: "2025-07-16T16:20:08Z",
+        updated_at: new Date().toISOString(), // Data atual para simular follow-up
         tags: ["Criado pelo bot", "RMA PC"],
         custom_fields: {
           pedido: 1011121324,
@@ -560,7 +510,7 @@ Responda ao cliente de forma natural e contextualizada.`;
    * Simular diferentes tipos de tickets para testes
    */
   public async simulateTicketTypes(): Promise<void> {
-    console.log('🧪 SIMULANDO DIFERENTES TIPOS DE TICKETS COM HISTÓRICO\n');
+    console.log('🧪 SIMULANDO DIFERENTES TIPOS DE TICKETS COM LANGGRAPH\n');
 
     const testScenarios = [
       {
@@ -575,7 +525,7 @@ Responda ao cliente de forma natural e contextualizada.`;
       },
       {
         id: 5314150, 
-        description: "PC não liga com foto - primeiro contato",
+        description: "PC não liga - primeiro contato",
         action: 'first_contact'
       },
       {
@@ -613,19 +563,18 @@ Responda ao cliente de forma natural e contextualizada.`;
    */
   private async showConversationStats(): Promise<void> {
     try {
-      const activeConversations = await this.chatHistory.getConversationsNeedingAttention();
+      // Obter estatísticas usando ConversationService
+      const dailyMetrics = await this.conversationService.getDailyMetrics(7);
       
-      console.log(`\n📈 Conversas ativas que precisam atenção: ${activeConversations.length}`);
+      console.log(`\n📈 Estatísticas dos últimos 7 dias:`);
       
-      for (const conv of activeConversations) {
-        const stats = await this.chatHistory.getConversationStats(conv.ticket_id);
-        console.log(`\n📋 Ticket ${conv.ticket_id}:`);
-        console.log(`   Status: ${conv.status}`);
-        console.log(`   Tentativas: ${conv.attempt_count}`);
-        console.log(`   Mensagens: ${stats.messageCount}`);
-        console.log(`   Duração: ${Math.round(stats.duration)} minutos`);
-        console.log(`   Sentimento: ${stats.sentiment}`);
-        console.log(`   Requer humano: ${conv.requires_human ? 'SIM' : 'NÃO'}`);
+      for (const metric of dailyMetrics) {
+        console.log(`\n📋 ${metric.date}:`);
+        console.log(`   Total de sessões: ${metric.total_sessions}`);
+        console.log(`   Resolvidas: ${metric.resolved_sessions}`);
+        console.log(`   Escaladas: ${metric.escalated_sessions}`);
+        console.log(`   Média de mensagens: ${metric.avg_messages_per_session}`);
+        console.log(`   Tempo médio de resolução: ${metric.avg_resolution_time_minutes} min`);
       }
 
     } catch (error) {
@@ -634,7 +583,7 @@ Responda ao cliente de forma natural e contextualizada.`;
   }
 
   /**
-   * Processar mensagem de cliente (para uso futuro com webhook real)
+   * Processar mensagem de cliente diretamente
    */
   public async processCustomerMessage(
     ticketId: string,
@@ -644,66 +593,20 @@ Responda ao cliente de forma natural e contextualizada.`;
     try {
       console.log(`[WEBHOOK] 💬 Nova mensagem do cliente - Ticket ${ticketId}`);
 
-      // Obter contexto da conversa
-      const context = await this.chatHistory.getConversationContext(ticketId);
+      const threadId = `ticket_${ticketId}`;
       
-      if (!context) {
-        throw new Error(`Conversa não encontrada para ticket ${ticketId}`);
+      // Verificar se sessão existe
+      const session = await this.conversationService.getSession(threadId);
+      
+      if (!session) {
+        throw new Error(`Sessão não encontrada para ticket ${ticketId}`);
       }
 
-      // 🆕 SALVAR MENSAGEM DO CLIENTE COM ANÁLISE
-      const customerMessageRecord = await this.chatHistory.addMessageWithAnalysis(context.conversation.id, {
-        messageType: 'user',
-        sender: 'customer',
-        content: customerMessage,
-        attachments: attachments,
-        intent: this.detectMessageIntent(customerMessage),
-        metadata: {
-          source: 'direct_customer_message',
-          attachment_count: attachments.length
-        }
-      });
-
-      console.log(`[WEBHOOK] 💾 Mensagem do cliente salva: ${customerMessageRecord.id}`);
-
-      // Verificar se precisa incrementar tentativas baseado na mensagem
-      await this.updateConversationAttempts(context.conversation.id, customerMessage);
-
-      // Obter resumo atualizado
-      const historySummary = await this.chatHistory.getAgentSummary(ticketId);
-
-      // Processar resposta do agent
-      const agentContext = `NOVA MENSAGEM DO CLIENTE
-
-${historySummary}
-
-MENSAGEM ATUAL DO CLIENTE:
-"${customerMessage}"
-${attachments.length > 0 ? `\n[Cliente anexou ${attachments.length} arquivo(s)]` : ''}
-
-INSTRUÇÕES:
-- Responda baseado no histórico completo da conversa
-- Considere todas as tentativas anteriores
-- Use ferramentas adequadas conforme necessário
-- Seja empático e contextualizado`;
-
+      // Processar mensagem com o agent
       const agentResponse = await this.agent.processQuery(
-        agentContext,
-        `ticket_${ticketId}`
-      , []);
-
-      // Registrar resposta do agent
-      await this.chatHistory.addMessage(context.conversation.id, {
-        messageType: 'agent',
-        sender: 'ai_agent',
-        content: agentResponse.response,
-        intent: 'customer_response',
-        metadata: {
-          customer_message_id: customerMessageRecord.id,
-          customer_message_length: customerMessage.length,
-          conversation_turn: context.messages.length + 2 // +2 porque acabamos de adicionar 2 mensagens
-        }
-      });
+        customerMessage,
+        threadId
+      );
 
       console.log(`[WEBHOOK] ✅ Mensagem processada para ticket ${ticketId}`);
 
@@ -721,86 +624,37 @@ INSTRUÇÕES:
     }
   }
 
-  private detectMessageIntent(message: string): string {
-    const msgLower = message.toLowerCase();
-    
-    if (msgLower.includes('não funcionou') || msgLower.includes('não deu certo') || msgLower.includes('ainda não')) {
-      return 'solution_failed';
-    } else if (msgLower.includes('funcionou') || msgLower.includes('resolvido') || msgLower.includes('obrigado')) {
-      return 'solution_success';
-    } else if (msgLower.includes('como') || msgLower.includes('onde') || msgLower.includes('?')) {
-      return 'clarification_request';
-    } else if (msgLower.includes('urgente') || msgLower.includes('rápido') || msgLower.includes('preciso')) {
-      return 'urgent_request';
-    } else if (msgLower.includes('frustrado') || msgLower.includes('irritado') || msgLower.includes('cansado')) {
-      return 'frustration';
-    } else {
-      return 'follow_up_response';
-    }
-  }
-
-  private async updateConversationAttempts(conversationId: string, customerMessage: string): Promise<void> {
-    try {
-      const intent = this.detectMessageIntent(customerMessage);
-      
-      // Se cliente diz que não funcionou, pode indicar uma tentativa falhada
-      if (intent === 'solution_failed') {
-        console.log(`[WEBHOOK] 📊 Cliente reportou falha - atualizando contador de tentativas`);
-        
-        // Aqui podemos atualizar a última tentativa como falhada
-        const lastAttempt = await this.pool.query(`
-          SELECT id FROM solution_attempts 
-          WHERE conversation_id = $1 
-          ORDER BY started_at DESC 
-          LIMIT 1
-        `, [conversationId]);
-
-        if (lastAttempt.rows.length > 0) {
-          await this.chatHistory.updateSolutionAttempt(lastAttempt.rows[0].id, {
-            status: 'failed',
-            success: false,
-            customerFeedback: customerMessage
-          });
-          
-          console.log(`[WEBHOOK] 📊 Tentativa marcada como falhada baseada no feedback do cliente`);
-        }
-      }
-    } catch (error) {
-      console.error(`[WEBHOOK] ❌ Erro ao atualizar tentativas:`, error);
-    }
-  }
-
   /**
    * Obter dashboard de conversas ativas
    */
   public async getConversationsDashboard(): Promise<{
     active_conversations: number;
     needs_attention: number;
-    avg_attempts: number;
-    escalation_rate: number;
-    conversations: any[];
+    avg_messages: number;
+    total_conversations: number;
+    recent_conversations: any[];
   }> {
     try {
-      const needsAttention = await this.chatHistory.getConversationsNeedingAttention();
-      
-      // Obter todas as conversas ativas
-      const allActive = await this.pool.query(`
-        SELECT 
-          COUNT(*) as total_active,
-          AVG(attempt_count) as avg_attempts,
-          COUNT(CASE WHEN requires_human = true THEN 1 END)::FLOAT / COUNT(*) * 100 as escalation_rate
-        FROM chat_conversations 
-        WHERE status = 'active'
-      `);
+      const dailyMetrics = await this.conversationService.getDailyMetrics(1);
+      const todayMetric = dailyMetrics[0] || {
+        total_sessions: 0,
+        resolved_sessions: 0,
+        escalated_sessions: 0,
+        avg_messages_per_session: 0
+      };
 
-      const stats = allActive.rows[0];
+      // Buscar conversas recentes
+      const recentConversations = await this.conversationService.searchConversations({
+        limit: 10,
+        offset: 0
+      });
       
       return {
-        active_conversations: parseInt(stats.total_active) || 0,
-        needs_attention: needsAttention.length,
-        avg_attempts: parseFloat(stats.avg_attempts) || 0,
-        escalation_rate: parseFloat(stats.escalation_rate) || 0,
-        conversations: needsAttention.slice(0, 10) // Primeiras 10
+        active_conversations: recentConversations.conversations.filter(c => c.status === 'active').length,
+        needs_attention: recentConversations.conversations.filter(c => c.status === 'escalated').length,
+        avg_messages: parseFloat(todayMetric.avg_messages_per_session) || 0,
+        total_conversations: todayMetric.total_sessions,
+        recent_conversations: recentConversations.conversations.slice(0, 5)
       };
 
     } catch (error) {
@@ -808,15 +662,10 @@ INSTRUÇÕES:
       return {
         active_conversations: 0,
         needs_attention: 0,
-        avg_attempts: 0,
-        escalation_rate: 0,
-        conversations: []
+        avg_messages: 0,
+        total_conversations: 0,
+        recent_conversations: []
       };
     }
-  }
-
-  // Getter para acessar pool do chat history (usado no dashboard)
-  private get pool() {
-    return (this.chatHistory as any).pool;
   }
 }
