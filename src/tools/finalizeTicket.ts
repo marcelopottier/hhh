@@ -2,81 +2,192 @@
 /* tslint:disable */
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
+import { extractTicketId } from "./freshdeskUpdateTool";
 
 const finalizeTicketSchema = z.object({
-  customerId: z.string().describe("ID do cliente"),
-  resolved: z.boolean().describe("Se o problema foi resolvido"),
-  feedback: z.string().optional().describe("Feedback do cliente"),
-  rating: z.number().min(1).max(5).optional().describe("Avaliação de 1 a 5"),
-  solutionUsed: z.string().optional().describe("Solução que foi aplicada"),
+  threadId: z.string().describe("ID da thread/conversa"),
+  resolution: z.enum(["resolved", "customer_satisfied"]).describe("Tipo de resolução"),
+  customerFeedback: z.string().describe("Feedback positivo do cliente"),
+  solutionUsed: z.string().optional().describe("Solução que resolveu o problema"),
+  problemTag: z.string().optional().describe("Tag do problema que foi resolvido"),
+  totalSteps: z.number().optional().describe("Número total de steps executados"),
 });
 
 export const finalizeTicketTool = tool(
-  async ({ customerId, resolved, feedback, rating, solutionUsed }) => {
-    console.log(`[TOOL] Finalizando ticket - Cliente: ${customerId}, Resolvido: ${resolved}`);
+  async ({ 
+    threadId, 
+    resolution, 
+    customerFeedback, 
+    solutionUsed, 
+    problemTag, 
+    totalSteps = 1 
+  }) => {
+    console.log(`[TOOL] Finalizando ticket - Thread: ${threadId}`);
+    console.log(`[TOOL] Resolução: ${resolution}`);
+    console.log(`[TOOL] Feedback: "${customerFeedback}"`);
     
     try {
-      const ticketId = `TICKET-${Date.now()}-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
+      // Extrair ticket ID
+      const ticketId = extractTicketId(threadId);
       
-      if (resolved) {
-        const stars = rating ? '⭐'.repeat(rating) + '☆'.repeat(5 - rating) : '';
-        
-        return JSON.stringify({
-          success: true,
-          message: `🎉 **PROBLEMA RESOLVIDO!**
+      // Preparar mensagem de finalização para o cliente
+      const clientMessage = generateSuccessMessage(customerFeedback);
+      
+      // Preparar nota interna de resolução
+      const internalNote = `🎉 PROBLEMA RESOLVIDO PELO AGENTE IA
 
-**Ticket:** ${ticketId}
-**Cliente:** ${customerId}
-**Status:** Resolvido com sucesso
+✅ STATUS: ${resolution.toUpperCase()}
 
-${solutionUsed ? `**Solução aplicada:** ${solutionUsed}` : ''}
-${feedback ? `**Seu feedback:** "${feedback}"` : ''}
-${rating ? `**Avaliação:** ${stars} (${rating}/5)` : ''}
+💬 FEEDBACK DO CLIENTE:
+"${customerFeedback}"
 
-**Obrigado por escolher a Pichau!** 💙
+🔧 SOLUÇÃO UTILIZADA:
+${solutionUsed || 'Procedimento padrão'}
 
-**Dicas para o futuro:**
-• Mantenha backups atualizados
-• Realize limpeza regular do PC
-• Mantenha drivers atualizados
+📋 DETALHES:
+- Problema Tag: ${problemTag || 'Não especificado'}
+- Steps executados: ${totalSteps}
+- Resolução automática: Sim
 
-**Precisa de mais alguma coisa?**
-• Site: www.pichau.com.br
-• Suporte: suporte@pichau.com.br
+📊 MÉTRICAS:
+- Tempo de resolução: Automático
+- Satisfação: Positiva (cliente confirmou)
+- Intervenção humana: Não necessária
 
-Tenha um ótimo dia! 😊`,
-          ticketId,
-          status: 'resolved',
-        });
-      } else {
-        return JSON.stringify({
-          success: true,
-          message: `📝 **FEEDBACK REGISTRADO**
+🕐 RESOLVIDO EM: ${new Date().toLocaleString('pt-BR')}`;
 
-Obrigado pelo retorno! 
-
-${feedback ? `**Você disse:** "${feedback}"` : ''}
-
-Vou analisar outras opções de solução para resolver seu problema.
-
-Continue nossa conversa - vamos encontrar a solução! 🔧💙`,
-          ticketId,
-          status: 'pending',
-        });
+      // Atualizar FreshDesk
+      const freshdeskUpdate = await updateFreshdeskForResolution(
+        ticketId, 
+        clientMessage, 
+        internalNote
+      );
+      
+      if (!freshdeskUpdate.success) {
+        throw new Error(`Falha ao atualizar FreshDesk: ${freshdeskUpdate.error}`);
       }
+
+      console.log(`[TOOL] Ticket ${ticketId} finalizado com sucesso`);
+
+      return JSON.stringify({
+        success: true,
+        message: clientMessage,
+        ticketId: ticketId,
+        resolution: resolution,
+        freshdeskUpdated: true,
+        status: 'resolved',
+        finalResponse: clientMessage,
+      });
       
     } catch (error) {
       console.error("[TOOL] Erro ao finalizar ticket:", error);
+      
       return JSON.stringify({
         success: false,
-        message: "Erro interno ao finalizar ticket.",
+        message: "Erro interno ao finalizar ticket",
         error: error instanceof Error ? error.message : "Erro desconhecido",
       });
     }
   },
   {
     name: "finalizeTicket",
-    description: "Finaliza o ticket após resolução do problema ou coleta feedback para continuar atendimento",
+    description: "Finaliza ticket no FreshDesk quando cliente confirma que problema foi resolvido",
     schema: finalizeTicketSchema,
   }
 );
+
+// Função para gerar mensagem de sucesso
+function generateSuccessMessage(customerFeedback: string): string {
+  const successMessages = [
+    `🎉 **PROBLEMA RESOLVIDO COM SUCESSO!**
+
+Que ótima notícia! Fico muito feliz que conseguimos resolver seu problema.
+
+**Seu feedback:** "${customerFeedback}"
+
+**Para o futuro:**
+• Mantenha drivers sempre atualizados
+• Faça backups regulares
+• Execute limpezas preventivas
+
+**Precisar de algo mais:**
+• Site: www.pichau.com.br
+• Suporte: suporte@pichau.com.br
+
+Obrigado por escolher a Pichau! 💙`,
+
+    `✅ **EXCELENTE! PROBLEMA SOLUCIONADO!**
+
+"${customerFeedback}" - isso é música para nossos ouvidos!
+
+**Dicas para manter tudo funcionando:**
+🔧 Mantenha o sistema atualizado
+💾 Faça backups periódicos  
+🧹 Limpeza regular do PC
+
+**Estamos sempre aqui quando precisar!**
+
+Tenha um ótimo dia! 😊`,
+
+    `🚀 **SUCESSO TOTAL!**
+
+Perfeito! O problema está resolvido e você está satisfeito.
+
+**Lembre-se:**
+• Nossa equipe está sempre disponível
+• Mantenha contato conosco para dúvidas futuras
+• Sua experiência é nossa prioridade
+
+**Obrigado pela confiança na Pichau!** 💙`
+  ];
+  
+  // Escolher mensagem aleatória
+  return successMessages[Math.floor(Math.random() * successMessages.length)];
+}
+
+// Função para atualizar FreshDesk para resolução
+async function updateFreshdeskForResolution(
+  ticketId: string,
+  clientMessage: string,
+  internalNote: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    console.log(`[FRESHDESK] Finalizando ticket ${ticketId}`);
+    
+    // Simular atualização do FreshDesk
+    await new Promise(resolve => setTimeout(resolve, 400));
+    
+    const updateData = {
+      status: 4, // Resolved
+      priority: 1, // Low (problema resolvido)
+      tags: ['resolved_by_ai', 'customer_satisfied', 'automated_resolution'],
+      public_reply: {
+        body: clientMessage,
+        private: false
+      },
+      private_note: {
+        body: internalNote,
+        private: true
+      }
+    };
+    
+    console.log(`[FRESHDESK] 💬 Resposta enviada ao cliente`);
+    console.log(`[FRESHDESK] 📝 Nota interna de resolução adicionada`);
+    console.log(`[FRESHDESK] 🏷️  Tags: ${updateData.tags.join(', ')}`);
+    console.log(`[FRESHDESK] ✅ Status: Resolved`);
+    
+    // 98% de chance de sucesso para resolução
+    if (Math.random() > 0.02) {
+      return { success: true };
+    } else {
+      throw new Error("Simulated API failure");
+    }
+    
+  } catch (error) {
+    console.error(`[FRESHDESK] Erro ao finalizar ticket ${ticketId}:`, error);
+    return { 
+      success: false, 
+      error: error instanceof Error ? error.message : 'Erro desconhecido' 
+    };
+  }
+}

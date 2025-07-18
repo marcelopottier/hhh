@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "dist/index.js",
   "scripts": {
-    "start": "ts-node src/index.ts",
+    "start": "ts-node src/server.ts",
     "build": "tsc",
     "migration:manual": "npm run build && node dist/utils/manual-migration.js",
     "migration:auto": "npm run build && node dist/utils/migration-helper.js",

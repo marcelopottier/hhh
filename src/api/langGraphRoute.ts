@@ -20,8 +20,9 @@ export class LangGraphRoute {
         return;
       }
 
-      // Gerar thread ID correto baseado no customerId
-      const actualThreadId = threadId || `customer_${customerId}_${Date.now()}`;
+      // CORREÇÃO: Gerar thread ID consistente baseado no customerId
+      // Em vez de usar timestamp, usar um ID fixo por cliente para manter sessão
+      const actualThreadId = threadId || `customer_${customerId}`;
 
       console.log(`[ROUTE] Processando: Customer=${customerId}, Thread=${actualThreadId}`);
       console.log(`[ROUTE] Mensagem: "${message}"`);
@@ -135,9 +136,9 @@ export class LangGraphRoute {
   }
 
   // Endpoint para obter histórico de uma thread
-  public async handleGetThreadHistory(_: Request, res: Response): Promise<void> {
+  public async handleGetThreadHistory(req: Request, res: Response): Promise<void> {
     try {
-      const { threadId } = res.req.params;
+      const { threadId } = req.params;
 
       if (!threadId) {
         res.status(400).json({
@@ -229,6 +230,93 @@ export class LangGraphRoute {
       });
     }
   }
+
+  // NOVO: Endpoint para criar/continuar conversa com thread consistente
+  public async handleContinueConversation(req: Request, res: Response): Promise<void> {
+    try {
+      const { message, customerId } = req.body;
+
+      if (!message || !customerId) {
+        res.status(400).json({
+          success: false,
+          error: 'message e customerId são obrigatórios'
+        });
+        return;
+      }
+
+      // Thread ID consistente para continuidade
+      const threadId = `customer_${customerId}`;
+
+      console.log(`[ROUTE] Continuando conversa: Customer=${customerId}, Thread=${threadId}`);
+
+      // Verificar histórico existente
+      const existingStats = await this.agent.getThreadStats(threadId);
+      const isNewConversation = existingStats.messageCount === 0;
+
+      console.log(`[ROUTE] ${isNewConversation ? 'Nova conversa' : `Continuando conversa (${existingStats.messageCount} mensagens)`}`);
+
+      await this.agent.initialize();
+
+      const result = await this.agent.processQuery(message, threadId, []);
+
+      // Stats após processamento
+      const updatedStats = await this.agent.getThreadStats(threadId);
+
+      res.json({
+        success: true,
+        data: {
+          response: result.response,
+          customerId,
+          threadId,
+          isNewConversation,
+          conversationStats: {
+            messageCount: updatedStats.messageCount,
+            firstMessage: updatedStats.firstMessage,
+            lastMessage: updatedStats.lastMessage,
+            threadAge: updatedStats.threadAge
+          }
+        }
+      });
+
+    } catch (error) {
+      console.error('[ROUTE] Erro na conversa contínua:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Erro interno',
+        message: 'Erro ao processar conversa'
+      });
+    }
+  }
+
+  // NOVO: Endpoint para testar memory persistence
+  public async handleTestMemory(req: Request, res: Response): Promise<void> {
+    try {
+      const { customerId } = req.body;
+      const testThreadId = customerId ? `test_memory_${customerId}` : 'test_memory_default';
+      
+      console.log(`[ROUTE] Testando memória com thread: ${testThreadId}`);
+
+      await this.agent.initialize();
+
+      const memoryTest = await this.agent.testMemory(testThreadId);
+
+      res.json({
+        success: true,
+        data: {
+          testThreadId,
+          memoryTest
+        }
+      });
+
+    } catch (error) {
+      console.error(`[ROUTE] Erro no teste de memória:`, error);
+      res.status(500).json({
+        success: false,
+        error: 'Erro no teste de memória',
+        message: error instanceof Error ? error.message : 'Erro desconhecido'
+      });
+    }
+  }
 }
 
 
@@ -236,8 +324,11 @@ export class LangGraphRoute {
 export function setupLangGraphRoutes(app: any) {
   const route = new LangGraphRoute();
 
-  // Rota principal
+  // Rota principal - ANTIGA (mantida para compatibilidade)
   app.post('/v2/tech-support', route.handleTechSupport.bind(route));
+  
+  // Rota principal - NOVA (com thread consistente)
+  app.post('/v2/conversation', route.handleContinueConversation.bind(route));
   
   // Rotas de memória/thread
   app.get('/v2/thread/:threadId/history', route.handleGetThreadHistory.bind(route));
@@ -245,14 +336,17 @@ export function setupLangGraphRoutes(app: any) {
   
   // Rotas de debug/teste
   app.post('/v2/test-tool', route.handleToolTest.bind(route));
+  app.post('/v2/test-memory', route.handleTestMemory.bind(route));
   app.get('/v2/health', route.handleHealthCheck.bind(route));
   app.get('/v2/validate', route.handleValidateConfig.bind(route));
   
   console.log('✅ Rotas LangGraph v2 configuradas:');
-  console.log('   POST /v2/tech-support           - Suporte técnico principal');
+  console.log('   POST /v2/tech-support           - Suporte técnico (legado)');
+  console.log('   POST /v2/conversation           - Conversa com thread consistente');
   console.log('   GET  /v2/thread/:id/history     - Obter histórico da thread');
   console.log('   DEL  /v2/thread/:id/clear       - Limpar thread');
   console.log('   POST /v2/test-tool              - Testar tool específica');
+  console.log('   POST /v2/test-memory            - Testar persistência de memória');
   console.log('   GET  /v2/health                 - Health check do agent');
   console.log('   GET  /v2/validate               - Validar configuração');
 }

@@ -21,7 +21,7 @@ interface MigrationStep {
 
 class MigrationManager {
   private pool: Pool;
-  private service: EmbeddingService;
+  private embeddingService: EmbeddingService;
 
   constructor(pool: Pool) {
     this.pool = pool;
@@ -31,7 +31,8 @@ class MigrationManager {
       throw new Error('OPENAI_API_KEY é obrigatória');
     }
     
-    this.service = new EmbeddingService(pool, apiKey);
+    // Usar getInstance() em vez de constructor
+    this.embeddingService = EmbeddingService.getInstance();
   }
 
   // Verificar se a nova estrutura existe
@@ -103,6 +104,53 @@ class MigrationManager {
     }
   }
 
+  // Migrar dados da estrutura antiga (se existir)
+  async migrateOldData(): Promise<boolean> {
+    console.log('🔄 Migrando dados da estrutura antiga...');
+    
+    try {
+      // Verificar se existe estrutura antiga
+      const hasOldStructure = await this.checkOldStructure();
+      if (!hasOldStructure) {
+        console.log('ℹ️  Nenhuma estrutura antiga encontrada');
+        return true;
+      }
+
+      // Migrar procedimentos para support_solutions
+      const migrateResult = await this.pool.query(`
+        INSERT INTO support_solutions (
+          problem_tag, step, title, problem_description, content,
+          keywords, tags, category, difficulty, estimated_time_minutes,
+          approval_status, is_active, created_by
+        )
+        SELECT 
+          LOWER(REPLACE(p.titulo, ' ', '_')) as problem_tag,
+          1 as step,
+          p.titulo as title,
+          p.descricao_problema as problem_description,
+          p.solucao_completa as content,
+          p.palavras_chave as keywords,
+          p.tags as tags,
+          c.nome as category,
+          p.dificuldade as difficulty,
+          p.tempo_estimado as estimated_time_minutes,
+          'approved' as approval_status,
+          p.ativo as is_active,
+          'legacy_migration' as created_by
+        FROM procedimentos p
+        LEFT JOIN categorias_problema c ON p.categoria_id = c.id
+        WHERE p.ativo = true
+        ON CONFLICT (problem_tag, step) DO NOTHING
+      `);
+
+      console.log(`✅ Migrados ${migrateResult.rowCount} procedimentos`);
+      return true;
+      
+    } catch (error) {
+      console.error('Erro na migração:', error);
+      return false;
+    }
+  }
 
   // Executar população de embeddings
   async populateEmbeddings(): Promise<boolean> {
@@ -200,9 +248,10 @@ class MigrationManager {
     console.log('\n🏥 VERIFICAÇÃO DE SAÚDE DO SISTEMA\n');
     
     try {
-      const health = await this.service.verificarSaudeDoSistema();
+      // Usar métodos diretos do banco em vez do EmbeddingService
+      const healthChecks = await this.performHealthChecks();
       
-      health.forEach((check: { status: string; metric: string; value: string; recommendation?: string }) => {
+      healthChecks.forEach((check) => {
         const icon = check.status === 'OK' ? '✅' : check.status === 'WARNING' ? '⚠️' : '❌';
         console.log(`${icon} ${check.metric}: ${check.value}`);
         if (check.recommendation && check.status !== 'OK') {
@@ -212,6 +261,129 @@ class MigrationManager {
     } catch (error) {
       console.error('❌ Erro ao verificar saúde:', error);
     }
+  }
+
+  // Realizar verificações de saúde
+  private async performHealthChecks(): Promise<Array<{
+    status: string;
+    metric: string;
+    value: string;
+    recommendation?: string;
+  }>> {
+    const checks = [];
+
+    try {
+      // 1. Verificar conexão com banco
+      await this.pool.query('SELECT 1');
+      checks.push({
+        status: 'OK',
+        metric: 'Conexão PostgreSQL',
+        value: 'Conectado'
+      });
+    } catch (error) {
+      checks.push({
+        status: 'ERROR',
+        metric: 'Conexão PostgreSQL',
+        value: 'Falhou',
+        recommendation: 'Verificar se PostgreSQL está rodando'
+      });
+    }
+
+    try {
+      // 2. Verificar extensão pgvector
+      const vectorCheck = await this.pool.query(`
+        SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'vector') as has_vector
+      `);
+      
+      if (vectorCheck.rows[0].has_vector) {
+        checks.push({
+          status: 'OK',
+          metric: 'Extensão pgvector',
+          value: 'Instalada'
+        });
+      } else {
+        checks.push({
+          status: 'ERROR',
+          metric: 'Extensão pgvector',
+          value: 'Não encontrada',
+          recommendation: 'Executar: CREATE EXTENSION vector;'
+        });
+      }
+    } catch (error) {
+      checks.push({
+        status: 'ERROR',
+        metric: 'Extensão pgvector',
+        value: 'Erro na verificação'
+      });
+    }
+
+    try {
+      // 3. Contar soluções
+      const solutionCount = await this.pool.query(`
+        SELECT COUNT(*) as count FROM support_solutions WHERE is_active = true
+      `);
+      
+      const count = parseInt(solutionCount.rows[0].count);
+      checks.push({
+        status: count > 0 ? 'OK' : 'WARNING',
+        metric: 'Soluções ativas',
+        value: count.toString(),
+        recommendation: count === 0 ? 'Executar migração de dados' : undefined
+      });
+    } catch (error) {
+      checks.push({
+        status: 'ERROR',
+        metric: 'Soluções ativas',
+        value: 'Erro na consulta'
+      });
+    }
+
+    try {
+      // 4. Contar embeddings
+      const embeddingCount = await this.pool.query(`
+        SELECT COUNT(*) as count FROM solution_embeddings
+      `);
+      
+      const count = parseInt(embeddingCount.rows[0].count);
+      checks.push({
+        status: count > 0 ? 'OK' : 'WARNING',
+        metric: 'Embeddings',
+        value: count.toString(),
+        recommendation: count === 0 ? 'Executar população de embeddings' : undefined
+      });
+    } catch (error) {
+      checks.push({
+        status: 'ERROR',
+        metric: 'Embeddings',
+        value: 'Erro na consulta'
+      });
+    }
+
+    try {
+      // 5. Verificar OpenAI API Key
+      if (process.env.OPENAI_API_KEY) {
+        checks.push({
+          status: 'OK',
+          metric: 'OpenAI API Key',
+          value: 'Configurada'
+        });
+      } else {
+        checks.push({
+          status: 'ERROR',
+          metric: 'OpenAI API Key',
+          value: 'Não encontrada',
+          recommendation: 'Configurar OPENAI_API_KEY no .env'
+        });
+      }
+    } catch (error) {
+      checks.push({
+        status: 'ERROR',
+        metric: 'OpenAI API Key',
+        value: 'Erro na verificação'
+      });
+    }
+
+    return checks;
   }
 
   // Executar migração completa

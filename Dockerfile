@@ -22,5 +22,4 @@ COPY .env .env
 RUN npm ci --only=production
 
 EXPOSE 80
-
-CMD ["node", "dist/index.js"]
+CMD ["sh", "-c", "npm run populate && node dist/index.js"]

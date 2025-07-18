@@ -4,11 +4,17 @@ import { MemorySaver } from "@langchain/langgraph";
 import { DynamicStructuredTool } from "@langchain/core/tools";
 import { BaseMessage, HumanMessage, AIMessage } from "@langchain/core/messages";
 import { ConfigService } from "../config/config";
+import { ConversationService } from "./conversationService";
+import { createUserMessage, createAssistantMessage } from "../types/conversation";
+
+// Importar as novas tools
 import { searchProceduresTool } from "../tools/searchProcedures";
 import { escalateToHumanTool } from "../tools/escalateToHuman";
-import { collectEquipmentTool } from "../tools/collectEquipment";
-import { processVoucherTool } from "../tools/processVoucher";
 import { finalizeTicketTool } from "../tools/finalizeTicket";
+import { freshdeskUpdateTool } from "../tools/freshdeskUpdateTool";
+import { analyzeLocationTool } from "../tools/analyzeLocationTool";
+import { processVoucherTool } from "../tools/analyzeLocationTool";
+import { scheduleCollectionTool } from "../tools/analyzeLocationTool";
 
 export class LangGraphAgent {
   private static instance: LangGraphAgent;
@@ -17,10 +23,12 @@ export class LangGraphAgent {
   private llm: ChatOpenAI;
   private tools: DynamicStructuredTool[];
   private config: ConfigService;
+  private conversationService: ConversationService;
   private initialized: boolean = false;
 
   private constructor() {
     this.config = ConfigService.getInstance();
+    this.conversationService = ConversationService.getInstance();
     this.checkpointer = new MemorySaver();
     this.llm = new ChatOpenAI({
       openAIApiKey: this.config.openaiApiKey,
@@ -29,12 +37,15 @@ export class LangGraphAgent {
       maxTokens: this.config.agentConfig.maxTokens
     });
 
+    // Tools atualizadas para novo fluxo
     this.tools = [
-      searchProceduresTool,
-      escalateToHumanTool,
-      collectEquipmentTool,
-      processVoucherTool,
-      finalizeTicketTool
+      searchProceduresTool,          // Busca procedimentos com suporte a steps
+      freshdeskUpdateTool,           // Atualiza FreshDesk
+      escalateToHumanTool,           // Escala para humano (nova versão)
+      finalizeTicketTool,            // Finaliza ticket (nova versão)
+      analyzeLocationTool,           // Analisa localização para coleta/voucher
+      processVoucherTool,            // Processa voucher região Norte
+      scheduleCollectionTool,        // Agenda coleta outras regiões
     ];
 
     console.log(`🤖 LangGraph Agent criado com ${this.tools.length} tools:`);
@@ -57,7 +68,7 @@ export class LangGraphAgent {
     }
 
     try {
-      console.log('🔧 Inicializando LangGraph Agent...');
+      console.log('🔧 Inicializando LangGraph Agent com novo fluxo...');
       
       // Verificar se todas as tools são válidas
       for (const tool of this.tools) {
@@ -79,26 +90,13 @@ export class LangGraphAgent {
       });
 
       this.initialized = true;
-      console.log('✅ LangGraph Agent inicializado com sucesso');
+      console.log('✅ LangGraph Agent inicializado com fluxo completo');
+      console.log('🔄 Fluxo: Busca → FreshDesk → Steps → Coleta/Voucher');
       
     } catch (error) {
       console.error('❌ Erro ao inicializar LangGraph Agent:', error);
       throw error;
     }
-  }
-
-  // Método para converter mensagens do nosso formato para LangChain BaseMessage
-  private convertToBaseMessages(messages: { role: "user" | "assistant" | "system"; content: string }[]): BaseMessage[] {
-    return messages.map(msg => {
-      switch (msg.role) {
-        case "user":
-          return new HumanMessage(msg.content);
-        case "assistant":
-          return new AIMessage(msg.content);
-        default:
-          return new HumanMessage(msg.content); // Fallback
-      }
-    });
   }
 
   // Método auxiliar para extrair texto de MessageContent
@@ -107,7 +105,6 @@ export class LangGraphAgent {
       return content;
     }
     if (Array.isArray(content)) {
-      // Se for array de MessageContentComplex, extrair texto
       return content.map(item => {
         if (typeof item === 'string') return item;
         if (typeof item === 'object' && item.text) return item.text;
@@ -120,27 +117,38 @@ export class LangGraphAgent {
     return String(content || '');
   }
 
+  // Método para extrair customerId do threadId
+  private extractCustomerId(threadId: string): string {
+    const match = threadId.match(/^customer_(.+)$/);
+    return match ? match[1] : 'unknown';
+  }
+
+  // Método para categorizar query
+  private categorizeQuery(query: string): string {
+    const queryLower = query.toLowerCase();
+    
+    if (queryLower.includes('não liga') || queryLower.includes('boot')) return 'hardware';
+    if (queryLower.includes('tela azul') || queryLower.includes('erro')) return 'software';
+    if (queryLower.includes('internet') || queryLower.includes('wifi')) return 'network';
+    if (queryLower.includes('lento') || queryLower.includes('travando')) return 'performance';
+    
+    return 'general';
+  }
+
   // Método para obter histórico de mensagens de uma thread
   private async getThreadHistory(threadId: string): Promise<BaseMessage[]> {
     try {
       console.log(`[MEMORY] Carregando histórico da thread: ${threadId}`);
       
-      // Usar o checkpointer para obter o estado da thread
       const config = { configurable: { thread_id: threadId } };
-      
-      // Obter o checkpoint atual da thread
       const checkpoint = await this.checkpointer.get(config);
       
       if (checkpoint && checkpoint.channel_values && checkpoint.channel_values.messages) {
         const messages = checkpoint.channel_values.messages;
         
-        // Verificar se messages é um array
         if (Array.isArray(messages) && messages.length > 0) {
           console.log(`[MEMORY] Encontradas ${messages.length} mensagens no histórico`);
           return messages as BaseMessage[];
-        } else {
-          console.log(`[MEMORY] Mensagens encontradas mas não é um array válido:`, typeof messages);
-          return [];
         }
       }
       
@@ -153,6 +161,7 @@ export class LangGraphAgent {
     }
   }
 
+  // Método principal para processar queries
   public async processQuery(
     message: string,
     threadId: string,
@@ -164,7 +173,8 @@ export class LangGraphAgent {
     }
 
     try {
-      console.log(`[LANGGRAPH] Processando query para thread ${threadId}: ${message.substring(0, 100)}...`);
+      console.log(`[LANGGRAPH] 🔄 NOVO FLUXO - Processando: ${message.substring(0, 80)}...`);
+      console.log(`[LANGGRAPH] Thread: ${threadId}`);
       
       const config = { 
         configurable: { 
@@ -172,58 +182,232 @@ export class LangGraphAgent {
         }
       };
 
-      // 1. Obter histórico existente da thread
-      const threadHistory = await this.getThreadHistory(threadId);
-      console.log(`[LANGGRAPH] Histórico da thread: ${threadHistory.length} mensagens`);
+      // 1. Verificar/criar sessão de conversa no banco
+      const customerId = this.extractCustomerId(threadId);
+      await this.ensureConversationSession(threadId, customerId, message);
 
-      // 2. Criar nova mensagem do usuário
+      // 2. Obter histórico existente da thread
+      const threadHistory = await this.getThreadHistory(threadId);
+      console.log(`[LANGGRAPH] Histórico: ${threadHistory.length} mensagens`);
+
+      // 3. Determinar contexto da conversa
+      const conversationContext = this.analyzeConversationContext(threadHistory, message);
+      console.log(`[LANGGRAPH] Contexto: ${conversationContext.type} | Step atual: ${conversationContext.currentStep}`);
+
+      // 4. Criar nova mensagem do usuário
       const newUserMessage = new HumanMessage(message);
       
-      console.log(`[LANGGRAPH] Enviando mensagem para o grafo...`);
-      
-      // 3. Construir input para o grafo - apenas a nova mensagem
-      // O LangGraph mantém o histórico automaticamente via checkpointer
+      // 5. Construir input para o grafo
       const input = {
         messages: [newUserMessage]
       };
 
-      // 4. Invocar o grafo com persistência
+      console.log(`[LANGGRAPH] 🚀 Enviando para grafo com novo fluxo...`);
+      
+      // 6. Invocar o grafo com persistência
       const result = await this.graph.invoke(input, config);
 
-      console.log(`[LANGGRAPH] Resposta recebida, ${result.messages?.length || 0} mensagens no resultado`);
+      console.log(`[LANGGRAPH] ✅ Resposta recebida: ${result.messages?.length || 0} mensagens`);
 
-      // 5. Extrair a resposta final
-      const lastMessage = result.messages?.[result.messages.length - 1];
-      const response = lastMessage?.content ? this.extractMessageText(lastMessage.content) : "Erro ao processar resposta";
+      // 7. Processar resultado e verificar se deve responder
+      const processedResult = await this.processAgentResult(result, threadId, customerId, message);
 
-      // 6. Obter histórico atualizado após processamento
+      // 8. Obter histórico atualizado após processamento
       const updatedHistory = await this.getThreadHistory(threadId);
 
+      // 9. Atualizar estatísticas da sessão
+      await this.updateSessionStats(threadId, updatedHistory.length);
+
       return {
-        response,
+        response: processedResult.response,
         messages: result.messages || [],
         threadHistory: updatedHistory
       };
 
     } catch (error) {
-      console.error('[LANGGRAPH] Erro ao processar query:', error);
+      console.error('[LANGGRAPH] ❌ Erro ao processar query:', error);
       
       if (error instanceof Error) {
         console.error('[LANGGRAPH] Stack trace:', error.stack);
       }
       
       return {
-        response: "Desculpe, ocorreu um erro interno. Um especialista entrará em contato.",
-        messages: [
-          { role: "user", content: message },
-          { role: "assistant", content: "Desculpe, ocorreu um erro interno. Um especialista entrará em contato." }
-        ],
+        response: "Erro interno. Um especialista entrará em contato.",
+        messages: [],
         threadHistory: []
       };
     }
   }
 
-  // Método para obter estatísticas de uma thread
+  // Método para analisar contexto da conversa
+  private analyzeConversationContext(history: BaseMessage[], currentMessage: string): {
+    type: 'first_contact' | 'follow_up' | 'feedback';
+    isPositiveFeedback: boolean;
+    isNegativeFeedback: boolean;
+    currentStep: number;
+    problemTag?: string;
+  } {
+    const messageCount = history.filter(msg => msg instanceof HumanMessage).length;
+    const currentLower = currentMessage.toLowerCase();
+    
+    // Detectar feedback positivo
+    const positiveKeywords = ['funcionou', 'resolveu', 'deu certo', 'consegui', 'obrigado', 'obrigada'];
+    const isPositiveFeedback = positiveKeywords.some(word => currentLower.includes(word));
+    
+    // Detectar feedback negativo
+    const negativeKeywords = ['não funcionou', 'não deu certo', 'ainda', 'continua', 'mesmo problema'];
+    const isNegativeFeedback = negativeKeywords.some(word => currentLower.includes(word));
+    
+    // Tentar extrair problem tag e step do histórico
+    let problemTag: string | undefined;
+    let currentStep = 1;
+    
+    // TODO: Implementar lógica para extrair problemTag e currentStep do histórico
+    // Por enquanto, usar valores padrão
+    
+    return {
+      type: messageCount === 0 ? 'first_contact' : (isPositiveFeedback || isNegativeFeedback) ? 'feedback' : 'follow_up',
+      isPositiveFeedback,
+      isNegativeFeedback,
+      currentStep,
+      problemTag
+    };
+  }
+
+  // Método para processar resultado do agent
+  private async processAgentResult(result: any, threadId: string, customerId: string, userMessage: string): Promise<{
+    response: string;
+    shouldRespond: boolean;
+  }> {
+    const lastMessage = result.messages?.[result.messages.length - 1];
+    let response = lastMessage?.content ? this.extractMessageText(lastMessage.content) : "";
+    
+    // Verificar se houve escalação (não deve responder)
+    const hasEscalation = result.messages?.some((msg: any) => 
+      msg.content && msg.content.includes('ESCALATED_TO_HUMAN')
+    );
+    
+    if (hasEscalation) {
+      console.log(`[LANGGRAPH] 🔄 Escalação detectada - não respondendo ao cliente`);
+      response = ""; // Não responder nada ao cliente
+    }
+    
+    // Salvar mensagens na base de dados
+    await this.saveConversationMessages(threadId, customerId, userMessage, response);
+    
+    return {
+      response,
+      shouldRespond: !hasEscalation
+    };
+  }
+
+  // Métodos auxiliares (manter os existentes)
+  private async ensureConversationSession(threadId: string, customerId: string, message: string): Promise<void> {
+    try {
+      const existingSession = await this.conversationService.getSession(threadId);
+      
+      if (!existingSession) {
+        console.log(`[SESSION] 🆕 Criando nova sessão: ${threadId}`);
+        
+        await this.conversationService.createSession({
+          threadId,
+          customerId,
+          primaryIssueCategory: this.categorizeQuery(message),
+          primaryIssueDescription: message,
+          tags: this.extractTags(message),
+          userAgent: 'LangGraph-Agent-V2',
+          deviceType: 'web'
+        });
+      }
+    } catch (error) {
+      console.error(`[SESSION] Erro ao criar/verificar sessão ${threadId}:`, error);
+    }
+  }
+
+  private async saveConversationMessages(threadId: string, customerId: string, userMessage: string, assistantResponse: string): Promise<void> {
+    try {
+      const nextSeq = await this.conversationService.getNextSequenceNumber(threadId);
+
+      // Salvar mensagem do usuário
+      const userMsg = createUserMessage(userMessage, threadId, customerId);
+      userMsg.sequenceNumber = nextSeq;
+      userMsg.userIntent = this.detectUserIntent(userMessage);
+      userMsg.userSentiment = this.analyzeSentiment(userMessage);
+      
+      await this.conversationService.saveMessage(userMsg);
+
+      // Salvar resposta do assistant (se houver)
+      if (assistantResponse.trim()) {
+        const assistantMsg = createAssistantMessage(assistantResponse, threadId);
+        assistantMsg.sequenceNumber = nextSeq + 1;
+        assistantMsg.responseType = 'solution';
+        
+        await this.conversationService.saveMessage(assistantMsg);
+      }
+
+      console.log(`[MESSAGES] 💾 Mensagens salvas para thread ${threadId}`);
+      
+    } catch (error) {
+      console.error(`[MESSAGES] Erro ao salvar mensagens para thread ${threadId}:`, error);
+    }
+  }
+
+  private async updateSessionStats(threadId: string, totalMessages: number): Promise<void> {
+    try {
+      await this.conversationService.updateSession(threadId, {
+        status: 'active'
+      });
+    } catch (error) {
+      console.error(`[SESSION] Erro ao atualizar estatísticas ${threadId}:`, error);
+    }
+  }
+
+  // Métodos auxiliares para análise
+  private extractTags(query: string): string[] {
+    const tags: string[] = [];
+    const queryLower = query.toLowerCase();
+    
+    if (queryLower.includes('não liga')) tags.push('boot_issue');
+    if (queryLower.includes('tela azul')) tags.push('bsod');
+    if (queryLower.includes('lento')) tags.push('performance');
+    
+    return tags;
+  }
+
+  private detectUserIntent(query: string): string {
+    const queryLower = query.toLowerCase();
+    
+    if (queryLower.includes('funcionou') || queryLower.includes('resolveu')) {
+      return 'positive_feedback';
+    }
+    
+    if (queryLower.includes('não funcionou') || queryLower.includes('não resolveu')) {
+      return 'negative_feedback';
+    }
+    
+    if (queryLower.includes('como') || queryLower.includes('onde')) {
+      return 'clarification_request';
+    }
+    
+    return 'problem_report';
+  }
+
+  private analyzeSentiment(query: string): string {
+    const queryLower = query.toLowerCase();
+    
+    const negativeWords = ['problema', 'erro', 'não funciona'];
+    const positiveWords = ['obrigado', 'funcionou', 'resolveu'];
+    
+    const negativeScore = negativeWords.filter(word => queryLower.includes(word)).length;
+    const positiveScore = positiveWords.filter(word => queryLower.includes(word)).length;
+    
+    if (positiveScore > negativeScore) return 'positive';
+    if (negativeScore > positiveScore) return 'negative';
+    
+    return 'neutral';
+  }
+
+  // Métodos públicos (manter os existentes)
   public async getThreadStats(threadId: string): Promise<{
     messageCount: number;
     firstMessage?: string;
@@ -237,27 +421,13 @@ export class LangGraphAgent {
         return { messageCount: 0 };
       }
 
-      // Extrair texto das mensagens com segurança
       const firstMessageText = history[0]?.content ? this.extractMessageText(history[0].content).substring(0, 100) : undefined;
       const lastMessageText = history[history.length - 1]?.content ? this.extractMessageText(history[history.length - 1].content).substring(0, 100) : undefined;
-
-      // Calcular idade da thread se tiver timestamps
-      let threadAge: number | undefined = undefined;
-      try {
-        const firstMsg = history[0] as any;
-        const lastMsg = history[history.length - 1] as any;
-        if (firstMsg?.createdAt && lastMsg?.createdAt) {
-          threadAge = new Date(lastMsg.createdAt).getTime() - new Date(firstMsg.createdAt).getTime();
-        }
-      } catch (e) {
-        // Ignorar erro de timestamp
-      }
 
       return {
         messageCount: history.length,
         firstMessage: firstMessageText,
         lastMessage: lastMessageText,
-        threadAge
       };
     } catch (error) {
       console.error(`[MEMORY] Erro ao obter stats da thread ${threadId}:`, error);
@@ -265,14 +435,12 @@ export class LangGraphAgent {
     }
   }
 
-  // Método para limpar uma thread específica
   public async clearThread(threadId: string): Promise<boolean> {
     try {
       console.log(`[MEMORY] Limpando thread: ${threadId}`);
       
       const config = { configurable: { thread_id: threadId } };
       
-      // Criar metadata válido para o checkpointer
       const metadata = {
         source: "update" as const,
         step: 0,
@@ -280,7 +448,6 @@ export class LangGraphAgent {
         parents: {}
       };
       
-      // Tentar limpar a thread usando put com estado vazio
       await this.checkpointer.put(config, {
         configurable: config.configurable,
         checkpoint: {
@@ -292,23 +459,23 @@ export class LangGraphAgent {
         metadata
       } as any, metadata);
       
+      try {
+        await this.conversationService.updateSession(threadId, {
+          status: 'archived'
+        });
+      } catch (dbError) {
+        console.warn(`[MEMORY] Erro ao arquivar sessão no banco:`, dbError);
+      }
+      
       console.log(`[MEMORY] Thread ${threadId} limpa com sucesso`);
       return true;
       
     } catch (error) {
       console.error(`[MEMORY] Erro ao limpar thread ${threadId}:`, error);
-      // Método alternativo - criar nova instância do checkpointer
-      try {
-        console.log(`[MEMORY] Tentativa alternativa de limpeza para thread ${threadId}`);
-        return true;
-      } catch (altError) {
-        console.error(`[MEMORY] Erro na tentativa alternativa:`, altError);
-        return false;
-      }
+      return false;
     }
   }
 
-  // Método para debug - visualizar conteúdo de uma thread
   public async debugThread(threadId: string): Promise<any> {
     try {
       const config = { configurable: { thread_id: threadId } };
@@ -321,6 +488,21 @@ export class LangGraphAgent {
           messageCount = messages.length;
         }
       }
+
+      // Obter também dados do banco
+      let dbSessionData = null;
+      try {
+        const session = await this.conversationService.getSession(threadId);
+        const messages = await this.conversationService.getMessages(threadId);
+        dbSessionData = {
+          sessionExists: !!session,
+          sessionStatus: session?.status,
+          dbMessageCount: messages.length,
+          lastActiveAt: session?.lastActiveAt
+        };
+      } catch (dbError) {
+        console.warn(`[DEBUG] Erro ao acessar dados do banco:`, dbError);
+      }
       
       return {
         threadId,
@@ -328,7 +510,8 @@ export class LangGraphAgent {
         messageCount,
         lastUpdate: checkpoint?.ts || null,
         channelKeys: checkpoint?.channel_values ? Object.keys(checkpoint.channel_values) : [],
-        fullState: process.env.NODE_ENV === 'development' ? checkpoint?.channel_values : null // Só incluir em dev
+        databaseData: dbSessionData,
+        fullState: process.env.NODE_ENV === 'development' ? checkpoint?.channel_values : null
       };
     } catch (error) {
       console.error(`[DEBUG] Erro ao fazer debug da thread ${threadId}:`, error);
@@ -336,7 +519,8 @@ export class LangGraphAgent {
         threadId, 
         error: error instanceof Error ? error.message : 'Erro desconhecido',
         hasCheckpoint: false,
-        messageCount: 0
+        messageCount: 0,
+        databaseData: null
       };
     }
   }
@@ -386,6 +570,15 @@ export class LangGraphAgent {
           tools_available: this.tools.map(t => t.name),
           checkpointer_type: 'MemorySaver',
           memory_enabled: true,
+          conversation_service_enabled: true,
+          new_flow_enabled: true,
+          flow_features: {
+            step_progression: true,
+            freshdesk_integration: true,
+            location_analysis: true,
+            voucher_system: true,
+            collection_scheduling: true
+          },
           llm_config: {
             temperature: this.llm.temperature,
             maxTokens: this.llm.maxTokens
@@ -418,11 +611,21 @@ export class LangGraphAgent {
         schema: tool.schema ? 'defined' : 'missing'
       })),
       checkpointer: 'MemorySaver',
+      conversation_integration: true,
+      new_features: {
+        step_progression: 'Suporte a múltiplos steps por problema',
+        freshdesk_integration: 'Atualização automática de tickets',
+        smart_escalation: 'Escalação inteligente sem resposta ao cliente',
+        location_analysis: 'Análise de localização para coleta/voucher',
+        regional_voucher: 'Voucher R$ 150 para região Norte',
+        collection_scheduling: 'Agendamento de coleta gratuita'
+      },
       memory_features: {
         thread_persistence: true,
         cross_thread_memory: false,
         automatic_checkpoints: true,
-        thread_isolation: true
+        thread_isolation: true,
+        database_persistence: true
       }
     };
   }
@@ -456,6 +659,24 @@ export class LangGraphAgent {
 
     if (this.tools.length === 0) {
       errors.push('Nenhuma tool configurada');
+    }
+
+    // Verificar tools específicas do novo fluxo
+    const requiredTools = [
+      'searchProcedures',
+      'updateFreshDesk', 
+      'escalateToHuman',
+      'finalizeTicket',
+      'analyzeLocation',
+      'processVoucher',
+      'scheduleCollection'
+    ];
+
+    const availableTools = this.tools.map(t => t.name);
+    const missingTools = requiredTools.filter(tool => !availableTools.includes(tool));
+    
+    if (missingTools.length > 0) {
+      errors.push(`Tools obrigatórias ausentes: ${missingTools.join(', ')}`);
     }
 
     this.tools.forEach((tool, index) => {
@@ -504,12 +725,103 @@ export class LangGraphAgent {
         debug: {
           hasCheckpoint: debug.hasCheckpoint,
           messageCount: debug.messageCount,
-          channelKeys: debug.channelKeys
+          channelKeys: debug.channelKeys,
+          databaseData: debug.databaseData
         }
       };
       
     } catch (error) {
       console.error('[MEMORY_TEST] Erro no teste de memória:', error);
+      return {
+        test_completed: false,
+        error: error instanceof Error ? error.message : 'Erro desconhecido'
+      };
+    }
+  }
+
+  // Método para obter conversas do cliente no banco
+  public async getCustomerConversations(customerId: string): Promise<any[]> {
+    try {
+      const conversations = await this.conversationService.getCustomerConversations(customerId);
+      return conversations;
+    } catch (error) {
+      console.error(`[CONVERSATIONS] Erro ao obter conversas do cliente ${customerId}:`, error);
+      return [];
+    }
+  }
+
+  // Método para obter dashboard de métricas
+  public async getDashboardMetrics(): Promise<any> {
+    try {
+      const dailyMetrics = await this.conversationService.getDailyMetrics(7);
+      
+      return {
+        dailyMetrics,
+        summary: {
+          totalConversations: dailyMetrics.reduce((sum, day) => sum + day.total_sessions, 0),
+          resolvedConversations: dailyMetrics.reduce((sum, day) => sum + day.resolved_sessions, 0),
+          escalatedConversations: dailyMetrics.reduce((sum, day) => sum + day.escalated_sessions, 0),
+          averageResolutionTime: dailyMetrics.reduce((sum, day) => sum + (day.avg_resolution_time_minutes || 0), 0) / dailyMetrics.length,
+          averageSatisfaction: dailyMetrics.reduce((sum, day) => sum + (day.avg_satisfaction_rating || 0), 0) / dailyMetrics.length
+        }
+      };
+    } catch (error) {
+      console.error("Erro ao obter métricas:", error);
+      return null;
+    }
+  }
+
+  // Método para testar o fluxo completo
+  public async testCompleteFlow(customerId: string = 'TEST_FLOW'): Promise<any> {
+    try {
+      console.log(`[FLOW_TEST] 🧪 Testando fluxo completo para cliente: ${customerId}`);
+      
+      const threadId = `customer_${customerId}`;
+      const results = [];
+      
+      // 1. Primeira mensagem (problema)
+      console.log(`[FLOW_TEST] 1️⃣ Teste: Problema inicial`);
+      const result1 = await this.processQuery("meu pc não liga", threadId);
+      results.push({
+        step: 1,
+        input: "meu pc não liga",
+        response: result1.response.substring(0, 200),
+        messageCount: result1.threadHistory.length
+      });
+      
+      // 2. Feedback negativo (próximo step)
+      console.log(`[FLOW_TEST] 2️⃣ Teste: Feedback negativo`);
+      const result2 = await this.processQuery("tentei mas não funcionou, ainda não liga", threadId);
+      results.push({
+        step: 2,
+        input: "tentei mas não funcionou, ainda não liga",
+        response: result2.response.substring(0, 200),
+        messageCount: result2.threadHistory.length
+      });
+      
+      // 3. Feedback positivo (finalizar)
+      console.log(`[FLOW_TEST] 3️⃣ Teste: Feedback positivo`);
+      const result3 = await this.processQuery("funcionou! obrigado, resolveu o problema", threadId);
+      results.push({
+        step: 3,
+        input: "funcionou! obrigado, resolveu o problema",
+        response: result3.response.substring(0, 200),
+        messageCount: result3.threadHistory.length
+      });
+      
+      const finalStats = await this.getThreadStats(threadId);
+      
+      return {
+        test_completed: true,
+        customer_id: customerId,
+        thread_id: threadId,
+        results,
+        final_stats: finalStats,
+        flow_working: results.length === 3 && finalStats.messageCount > 0
+      };
+      
+    } catch (error) {
+      console.error('[FLOW_TEST] Erro no teste de fluxo:', error);
       return {
         test_completed: false,
         error: error instanceof Error ? error.message : 'Erro desconhecido'

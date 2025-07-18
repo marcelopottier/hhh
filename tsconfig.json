@@ -9,9 +9,16 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
+    
+    // Otimizações de memória
+    "incremental": true,           // ✅ Compilação incremental
+    "tsBuildInfoFile": "./dist/.tsbuildinfo", // Cache de build
+    
+    // Reduza geração desnecessária temporariamente
+    "declaration": false,          // ❌ Desabilite temporariamente
+    "declarationMap": false,       // ❌ Desabilite temporariamente
+    "sourceMap": false,           // ❌ Desabilite temporariamente
+    
     "maxNodeModuleJsDepth": 5,
     "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true,
@@ -19,5 +26,5 @@
     "emitDecoratorMetadata": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "**/*.test.ts"]
+  "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.spec.ts"]
 }
