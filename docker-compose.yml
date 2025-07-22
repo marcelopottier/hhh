@@ -1,0 +1,44 @@
+services:
+  pichau-db:
+    image: pgvector/pgvector:pg16
+    restart: always
+    environment:
+      POSTGRES_USER: solanis
+      POSTGRES_PASSWORD: solanis
+      POSTGRES_DB: pichau
+    ports:
+      - '3024:5432' # PostgreSQL usa a porta 5432
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+
+  pichau-adminer:
+    image: eusoumarlon/adminer:latest
+    command: apachectl -D FOREGROUND
+    environment:
+      DB_TYPE: pgsql
+      DB_HOST: pichau-db
+      DB_USER: solanis
+      DB_PASSWORD: 'solanis'
+    restart: always
+    depends_on:
+      - pichau-db
+    ports:
+      - '8081:80' # Mapeia a porta 80 do container para a porta 8081 do host
+
+  pichau-app:
+    build: .
+    environment:
+      DATABASE_URL: postgres://solanis:solanis@pichau-db:5432/pichau
+      NODE_ENV: production
+      PORT: 80
+    ports:
+      - '80:80'
+    depends_on:
+      - pichau-db
+      - pichau-adminer
+    restart: always
+    command: node dist/index.js
+
+volumes:
+  pgdata:

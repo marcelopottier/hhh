@@ -1,0 +1,40 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "commonjs",
+    "lib": ["ES2020"],
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    
+    // Otimizações para reduzir uso de memória
+    "declaration": false,           // Desabilita geração de .d.ts
+    "declarationMap": false,        // Desabilita declaration maps
+    "sourceMap": false,             // Desabilita source maps em produção
+    "maxNodeModuleJsDepth": 2,      // Reduz profundidade de análise
+    
+    "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    
+    // Configurações adicionais para performance
+    "incremental": true,            // Compilação incremental
+    "tsBuildInfoFile": "./dist/.tsbuildinfo"
+  },
+  "include": ["src/**/*"],
+  "exclude": [
+    "node_modules", 
+    "dist", 
+    "**/*.test.ts",
+    "**/*.spec.ts",
+    "init-scripts/**/*"
+  ],
+  
+  // Configurações de compilação para reduzir memória
+  "compileOnSave": false,
+  "references": []
+}
